@@ -2,22 +2,21 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 import cloudscraper
 from bs4 import BeautifulSoup
-import re, logging, time, requests
+import re, logging, time, asyncio
 from fake_useragent import UserAgent
-from cachetools import TTLCache
+from typing import Dict
 
 app = FastAPI()
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("uvicorn")
 
-cache = TTLCache(maxsize=100, ttl=300)
+# Global cache
+stock_cache: Dict[str, dict] = {
+    "data": {},
+    "timestamp": 0
+}
 
 def scrape_stock_data():
-    cache_key = f"stock_data_{int(time.time() // 300)}"
-    if cache_key in cache:
-        return cache[cache_key]
-
     url = f"https://vulcanvalues.com/grow-a-garden/stock?_={int(time.time())}"
     ua = UserAgent()
     headers = {'User-Agent': ua.random}
@@ -25,7 +24,6 @@ def scrape_stock_data():
 
     for _ in range(3):
         try:
-            time.sleep(1)
             response = scraper.get(url, headers=headers, timeout=15)
             soup = BeautifulSoup(response.text, 'lxml')
             stock_data = {
@@ -66,25 +64,35 @@ def scrape_stock_data():
                 elif 'SEEDS' in title:
                     stock_data['seeds_stock'] = {'items': parsed_items, 'updates_in': updates_in}
 
-            cache[cache_key] = stock_data
             return stock_data
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Scraping Error: {e}")
             continue
     return {'error': 'Failed to retrieve data'}
 
+async def auto_update_cache():
+    while True:
+        logger.info("Refreshing stock data...")
+        stock_cache["data"] = scrape_stock_data()
+        stock_cache["timestamp"] = time.time()
+        await asyncio.sleep(300)  # wait 5 minutes
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(auto_update_cache())
+
 @app.get("/")
 async def all_data():
-    return JSONResponse(content=scrape_stock_data())
+    return JSONResponse(content=stock_cache["data"])
 
 @app.get("/gear")
 async def gear_data():
-    return JSONResponse(content=scrape_stock_data().get("gear_stock", {}))
+    return JSONResponse(content=stock_cache["data"].get("gear_stock", {}))
 
 @app.get("/egg")
 async def egg_data():
-    return JSONResponse(content=scrape_stock_data().get("egg_stock", {}))
+    return JSONResponse(content=stock_cache["data"].get("egg_stock", {}))
 
 @app.get("/seeds")
 async def seeds_data():
-    return JSONResponse(content=scrape_stock_data().get("seeds_stock", {}))
+    return JSONResponse(content=stock_cache["data"].get("seeds_stock", {}))
