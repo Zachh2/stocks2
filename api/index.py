@@ -12,7 +12,7 @@ logger = logging.getLogger("uvicorn")
 
 # Global cache
 stock_cache: Dict[str, dict] = {
-    "data": {},
+    "data": {"gear_stock": {}, "egg_stock": {}, "seeds_stock": {}},
     "timestamp": 0
 }
 
@@ -22,9 +22,15 @@ def scrape_stock_data():
     headers = {'User-Agent': ua.random}
     scraper = cloudscraper.create_scraper()
 
-    for _ in range(3):
+    for attempt in range(3):
         try:
+            logger.info(f"Fetching stock data (attempt {attempt+1})...")
             response = scraper.get(url, headers=headers, timeout=15)
+
+            if not response.text:
+                logger.warning("Empty response received")
+                continue
+
             soup = BeautifulSoup(response.text, 'lxml')
             stock_data = {
                 'gear_stock': {'items': [], 'updates_in': 'Unknown'},
@@ -34,9 +40,14 @@ def scrape_stock_data():
 
             stock_grid = soup.find('div', class_=re.compile(r'grid.*grid-cols'))
             if not stock_grid:
-                return {'error': 'Grid not found'}
+                logger.warning("Grid not found in HTML.")
+                continue
 
             stock_sections = stock_grid.find_all('div', recursive=False)
+            if not stock_sections:
+                logger.warning("No sections found inside stock grid.")
+                continue
+
             for section in stock_sections:
                 title_tag = section.find('h2')
                 if not title_tag: continue
@@ -55,7 +66,7 @@ def scrape_stock_data():
                     parsed_items.append({'name': name, 'quantity': quantity})
 
                 countdown = section.find('p', class_=re.compile(r'text-yellow.*'))
-                updates_in = countdown.find('span').text.strip() if countdown else 'Unknown'
+                updates_in = countdown.find('span').text.strip() if countdown and countdown.find('span') else 'Unknown'
 
                 if 'GEAR' in title:
                     stock_data['gear_stock'] = {'items': parsed_items, 'updates_in': updates_in}
@@ -64,18 +75,28 @@ def scrape_stock_data():
                 elif 'SEEDS' in title:
                     stock_data['seeds_stock'] = {'items': parsed_items, 'updates_in': updates_in}
 
-            return stock_data
+            # Only return if valid data is found
+            if any(stock_data[key]['items'] for key in stock_data):
+                return stock_data
+            else:
+                logger.warning("Parsed data is empty. Retrying...")
+
         except Exception as e:
             logger.error(f"Scraping Error: {e}")
             continue
-    return {'error': 'Failed to retrieve data'}
+
+    return {'error': 'Failed to retrieve valid data'}
 
 async def auto_update_cache():
     while True:
-        logger.info("Refreshing stock data...")
-        stock_cache["data"] = scrape_stock_data()
-        stock_cache["timestamp"] = time.time()
-        await asyncio.sleep(300)  # wait 5 minutes
+        logger.info("Auto-updating cache...")
+        data = scrape_stock_data()
+        if data and "error" not in data:
+            stock_cache["data"] = data
+            stock_cache["timestamp"] = time.time()
+        else:
+            logger.warning("Stock data was not updated due to scraping failure.")
+        await asyncio.sleep(300)  # Refresh every 5 minutes
 
 @app.on_event("startup")
 async def startup_event():
